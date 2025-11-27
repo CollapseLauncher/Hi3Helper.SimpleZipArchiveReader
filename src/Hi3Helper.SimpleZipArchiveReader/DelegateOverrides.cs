@@ -33,7 +33,7 @@ public static class DelegateOverrides
 
         responseMessage.EnsureSuccessStatusCode();
 
-        return responseMessage.Content.Headers.ContentRange.Length ?? 0;
+        return responseMessage.Content.Headers.ContentLength ?? 0;
     }
 
     private static async Task<Stream> ThisGetStreamFromPosAsync(
