@@ -255,7 +255,13 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         using (Stream bufferStreamOfEOCD = streamFactory(offsetOfEOCD, Constants.EOCDBufferLength))
         {
             scoped Span<byte> stackBuffer = stackalloc byte[Constants.EOCDBufferLength];
-            int               read        = bufferStreamOfEOCD.Read(stackBuffer);
+
+            int read;
+            int offset = 0;
+            while ((read = bufferStreamOfEOCD.Read(stackBuffer[offset..])) > 0)
+            {
+                offset += read;
+            }
             (offsetOfCD, sizeOfCD, archiveComment) = FindCentralDirectoryOffsetAndSize(stackBuffer[..read]);
         }
 
@@ -422,8 +428,13 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         byte[] buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
         try
         {
-            int read = await stream.ReadAsync(buffer, 0, bufferSize, token);
-            return FindCentralDirectoryOffsetAndSize(buffer.AsSpan(0, read));
+            int offset = 0;
+            int read;
+            while ((read = await stream.ReadAsync(buffer.AsMemory(offset), token)) > 0)
+            {
+                offset += read;
+            }
+            return FindCentralDirectoryOffsetAndSize(buffer.AsSpan(0, offset));
         }
         finally
         {
@@ -506,7 +517,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         return (offsetEOCDR64, sizeEOCDR64, archiveComment);
     }
 
-    #endregion
+#endregion
 
     #region IReadOnlyCollection extensions
 
