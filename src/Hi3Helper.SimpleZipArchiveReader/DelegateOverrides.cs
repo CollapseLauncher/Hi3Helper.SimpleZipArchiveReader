@@ -49,8 +49,13 @@ public static class DelegateOverrides
         HttpResponseMessage? response = null;
         try
         {
+#if NET6_0_OR_GREATER
+            response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+            return await response.Content.ReadAsStreamAsync(token);
+#else
             response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
             return await response.Content.ReadAsStreamAsync();
+#endif
         }
         finally
         {
