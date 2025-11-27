@@ -37,7 +37,7 @@ public sealed partial class ZipArchiveEntry
     #endregion
 
     /// <summary>
-    /// Open the entry as <see cref="Stream"/> from the factory.
+    /// Open the entry as <see cref="Stream"/> from the factory asynchronously.
     /// </summary>
     /// <param name="streamFactory">The factory of the source <see cref="Stream"/> for the reader to read from.</param>
     /// <param name="token">Cancellation token for asynchronous operations.</param>
@@ -92,7 +92,9 @@ public sealed partial class ZipArchiveEntry
                 return chunkSubStream;
             }
 
-            return new DeflateStream(chunkSubStream, CompressionMode.Decompress);
+            return IsDeflate64
+                ? new DeflateManagedStream(chunkSubStream, true, SizeCompressed)
+                : new DeflateStream(chunkSubStream, CompressionMode.Decompress);
         }
         catch
         {
@@ -107,5 +109,60 @@ public sealed partial class ZipArchiveEntry
                 ArrayPool<byte>.Shared.Return(extraDataBuffer);
             }
         }
+    }
+
+    /// <summary>
+    /// Open the entry as <see cref="Stream"/> from the factory.
+    /// </summary>
+    /// <param name="streamFactory">The factory of the source <see cref="Stream"/> for the reader to read from.</param>
+    /// <returns>Either decompression <see cref="DeflateStream"/> or non-compressed <see cref="Stream"/> (Stored).</returns>
+    /// <exception cref="InvalidOperationException"/>
+    public Stream OpenStreamFromFactory(StreamFactory streamFactory)
+    {
+        const int localHeaderLen      = 30;
+        const int filenameLenOffset   = 26;
+        const int extraFieldLenOffset = 28;
+
+        if (IsDirectory)
+        {
+            throw new InvalidOperationException("Cannot open Stream for Directory-kind entry.");
+        }
+
+        // Try skip local header
+        Stream stream = streamFactory(LocalBlockOffsetFromStream, null);
+        scoped Span<byte> headerBuffer = stackalloc byte[localHeaderLen];
+        int               read         = stream.Read(headerBuffer);
+
+        if (read < localHeaderLen)
+        {
+            throw new InvalidOperationException("Local Zip Block header is invalid!");
+        }
+
+        uint   signature     = MemoryMarshal.Read<uint>(headerBuffer);
+        ushort fileNameLen   = MemoryMarshal.Read<ushort>(headerBuffer[filenameLenOffset..]);
+        ushort extraFieldLen = MemoryMarshal.Read<ushort>(headerBuffer[extraFieldLenOffset..]);
+        int    extraDataLen  = fileNameLen + extraFieldLen;
+
+        if (Constants.Zip32LocalHeaderMagic != signature ||
+            fileNameLen > short.MaxValue ||
+            extraFieldLen > short.MaxValue)
+        {
+            throw new
+                InvalidOperationException("Local Zip Block header signature is invalid! Zip might be corrupted.");
+        }
+
+        scoped Span<byte> extraDataBuffer = stackalloc byte[extraDataLen];
+        _ = stream.Read(extraDataBuffer);
+
+        // Once getting the data position, assign to SubStream.
+        SequentialReadSubStream chunkSubStream = new(stream, SizeCompressed);
+        if (!IsDeflate)
+        {
+            return chunkSubStream;
+        }
+
+        return IsDeflate64
+            ? new DeflateManagedStream(chunkSubStream, true, SizeCompressed)
+            : new DeflateStream(chunkSubStream, CompressionMode.Decompress);
     }
 }
