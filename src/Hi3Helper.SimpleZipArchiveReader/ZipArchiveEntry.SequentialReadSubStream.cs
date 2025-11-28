@@ -9,7 +9,7 @@ public sealed partial class ZipArchiveEntry
 {
     private sealed class SequentialReadSubStream(Stream stream, long size) : Stream
     {
-        private          long _remainedToRead = size;
+        private long _remainedToRead = size;
 
         public override int Read(Span<byte> buffer)
         {

@@ -300,12 +300,21 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             return new ZipArchiveReader();
         }
 
-        bool isUseRentBuffer = size <= 4 << 20;
-        byte[] centralDirectoryBuffer = isUseRentBuffer
-            ? ArrayPool<byte>.Shared.Rent((int)size)
-            : DelegateOverrides.GetHeapArray((int)size);
-        Span<byte> centralDirectorySpan =
-            centralDirectoryBuffer.AsSpan(0, (int)size);
+        bool    isUseStackalloc        = size <= 64 << 10;
+        bool    isUseRentBuffer        = !isUseStackalloc && size <= 4 << 20;
+        byte[]? centralDirectoryBuffer = null;
+
+        if (!isUseStackalloc && isUseRentBuffer)
+        {
+            centralDirectoryBuffer = ArrayPool<byte>.Shared.Rent((int)size);
+        }
+
+        if (!isUseStackalloc)
+        {
+            centralDirectoryBuffer = DelegateOverrides.GetHeapArray((int)size);
+        }
+
+        scoped Span<byte> centralDirectorySpan = centralDirectoryBuffer ?? stackalloc byte[(int)size];
 
         try
         {
@@ -338,7 +347,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         }
         finally
         {
-            if (isUseRentBuffer)
+            if (isUseRentBuffer && centralDirectoryBuffer != null)
             {
                 ArrayPool<byte>.Shared.Return(centralDirectoryBuffer);
             }
