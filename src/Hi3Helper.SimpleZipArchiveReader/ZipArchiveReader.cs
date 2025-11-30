@@ -309,7 +309,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             centralDirectoryBuffer = ArrayPool<byte>.Shared.Rent((int)size);
         }
 
-        if (!isUseStackalloc)
+        if (!isUseStackalloc && !isUseRentBuffer)
         {
             centralDirectoryBuffer = DelegateOverrides.GetHeapArray((int)size);
         }
