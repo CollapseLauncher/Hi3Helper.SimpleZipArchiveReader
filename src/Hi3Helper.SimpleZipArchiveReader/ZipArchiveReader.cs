@@ -262,7 +262,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             {
                 offset += read;
             }
-            (offsetOfCD, sizeOfCD, archiveComment) = FindCentralDirectoryOffsetAndSize(stackBuffer[..read]);
+            (offsetOfCD, sizeOfCD, archiveComment) = FindCentralDirectoryOffsetAndSize(stackBuffer[..offset]);
         }
 
         if (offsetOfCD <= 0)

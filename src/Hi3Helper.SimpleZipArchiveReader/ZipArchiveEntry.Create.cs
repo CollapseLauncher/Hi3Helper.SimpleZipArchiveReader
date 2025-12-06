@@ -14,14 +14,6 @@ namespace Hi3Helper.SimpleZipArchiveReader;
 // https://github.com/dotnet/runtime/blob/main/src/libraries/System.IO.Compression/src/System/IO/Compression/ZipHelper.cs#L36
 public sealed partial class ZipArchiveEntry
 {
-    [Flags]
-    public enum ZipCDRBitFlagValues : ushort
-    {
-        IsEncrypted               = 0x1,
-        DataDescriptor            = 0x8,
-        UnicodeFileNameAndComment = 0x800
-    }
-
     private static bool TryReadZip64SizeFromExtraField(
         ReadOnlySpan<byte> dataTrailing,
         ref long           uncompressedSize,
@@ -104,7 +96,7 @@ public sealed partial class ZipArchiveEntry
     }
 
     internal static ReadOnlySpan<byte> CreateFromBlockSpan(
-        ReadOnlySpan<byte>        currentBlockSpan,
+        ReadOnlySpan<byte>  currentBlockSpan,
         out ZipArchiveEntry entry)
     {
         uint signature = BinaryPrimitives.ReadUInt32LittleEndian(currentBlockSpan);
@@ -112,27 +104,23 @@ public sealed partial class ZipArchiveEntry
         if (signature != Constants.Zip32CDRHeaderMagic)
             throw new InvalidOperationException("Invalid Central Directory signature.");
 
-        ZipCDRBitFlagValues flags = MemoryMarshal.Read<ZipCDRBitFlagValues>(currentBlockSpan[Zip32CDRFieldLocations.GeneralPurposeBitFlags..]);
+        ZipCdrBitFlagValues flags = MemoryMarshal.Read<ZipCdrBitFlagValues>(currentBlockSpan[Zip32CDRFieldLocations.GeneralPurposeBitFlags..]);
+        ZipCompressionTypes compressionType = MemoryMarshal.Read<ZipCompressionTypes>(currentBlockSpan[Zip32CDRFieldLocations.CompressionMethod..]);
 
-        ushort compressionType = MemoryMarshal.Read<ushort>(currentBlockSpan[Zip32CDRFieldLocations.CompressionMethod..]);
         uint   lastModified    = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.LastModified..]);
         uint   crc32           = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.Crc32..]);
         ushort fileNameLen     = MemoryMarshal.Read<ushort>(currentBlockSpan[Zip32CDRFieldLocations.FilenameLength..]);
         ushort extraFieldLen   = MemoryMarshal.Read<ushort>(currentBlockSpan[Zip32CDRFieldLocations.ExtraFieldLength..]);
         ushort fileCommentLen  = MemoryMarshal.Read<ushort>(currentBlockSpan[Zip32CDRFieldLocations.FileCommentLength..]);
 
-        if (flags.HasFlag(ZipCDRBitFlagValues.IsEncrypted))
+        if (flags.HasFlag(ZipCdrBitFlagValues.IsEncrypted))
         {
             throw new NotSupportedException("Encrypted archive is currently not supported.");
         }
 
-        if (compressionType is not (0 or 8 or 9))
-        {
-            throw new NotSupportedException("Compression is not supported. It must be either Store, Deflate or Deflate64");
-        }
-
         long compressedSize   = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.CompressedSize..]);
         long uncompressedSize = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.UncompressedSize..]);
+        bool isDeflate64      = compressedSize == Constants.Zip64Mask || uncompressedSize == Constants.Zip64Mask;
 
         long relativeOffsetOfLocalHeader = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.RelativeOffsetOfLocalHeader..]);
         ReadOnlySpan<byte> dynamicRecord = currentBlockSpan[Zip32CDRFieldLocations.DynamicData..];
@@ -153,8 +141,7 @@ public sealed partial class ZipArchiveEntry
                                            ref compressedSize,
                                            ref relativeOffsetOfLocalHeader);
 
-        string fileName    = Encoding.UTF8.GetString(fileNameSpan);
-        bool   isDeflate64 = compressedSize == Constants.Zip64Mask || uncompressedSize == Constants.Zip64Mask;
+        string fileName = Encoding.UTF8.GetString(fileNameSpan);
         entry = new ZipArchiveEntry
         {
             Comment                    = fileComment,
@@ -166,7 +153,7 @@ public sealed partial class ZipArchiveEntry
             LocalBlockOffsetFromStream = relativeOffsetOfLocalHeader,
             Size                       = uncompressedSize,
             SizeCompressed             = compressedSize,
-            IsDeflate                  = compressionType is 8 or 9
+            CompressionType            = compressionType
         };
 
         int endOfBlock = Zip32CDRFieldLocations.DynamicData + fileNameLen + extraFieldLen + fileCommentLen;
