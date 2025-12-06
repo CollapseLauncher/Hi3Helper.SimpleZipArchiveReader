@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -59,10 +60,10 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="IndexOutOfRangeException"/>
     /// <exception cref="NotSupportedException"/>
-    public static Task<ZipArchiveReader> CreateFromRemoteAsync(
+    public static Task<ZipArchiveReader> CreateFromAsync(
         string            url,
         CancellationToken token = default) =>
-        CreateFromRemoteAsync(url, null, token);
+        CreateFromAsync(url, null, token);
 
     /// <summary>
     /// Creates a <see cref="ZipArchiveReader"/> from a remote HTTP(S) URL.
@@ -73,10 +74,10 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="IndexOutOfRangeException"/>
     /// <exception cref="NotSupportedException"/>
-    public static Task<ZipArchiveReader> CreateFromRemoteAsync(
+    public static Task<ZipArchiveReader> CreateFromAsync(
         Uri               url,
         CancellationToken token = default) =>
-        CreateFromRemoteAsync(url, null, token);
+        CreateFromAsync(url, null, token);
 
     /// <summary>
     /// Creates a <see cref="ZipArchiveReader"/> from a remote HTTP(S) URL.
@@ -88,11 +89,11 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="IndexOutOfRangeException"/>
     /// <exception cref="NotSupportedException"/>
-    public static Task<ZipArchiveReader> CreateFromRemoteAsync(
+    public static Task<ZipArchiveReader> CreateFromAsync(
         string            url,
         HttpClient?       httpClient,
         CancellationToken token = default) =>
-        CreateFromRemoteAsync(new Uri(url), httpClient, token);
+        CreateFromAsync(new Uri(url), httpClient, token);
 
     /// <summary>
     /// Creates a <see cref="ZipArchiveReader"/> from a remote HTTP(S) URL.
@@ -104,7 +105,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="IndexOutOfRangeException"/>
     /// <exception cref="NotSupportedException"/>
-    public static async Task<ZipArchiveReader> CreateFromRemoteAsync(
+    public static async Task<ZipArchiveReader> CreateFromAsync(
         Uri               url,
         HttpClient?       httpClient,
         CancellationToken token = default)
@@ -153,10 +154,10 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             }
 
             ZipArchiveReader reader =
-                await CreateFromCentralDirectoryStreamAsync(CreateStreamFromOffset,
-                                                            sizeOfCD,
-                                                            offsetOfCD,
-                                                            token);
+                await CreateFromCentralDirectoryStreamFactoryAsync(CreateStreamFromOffset,
+                                                                   sizeOfCD,
+                                                                   offsetOfCD,
+                                                                   token);
 
             reader.ArchiveComment = archiveComment;
             return reader;
@@ -199,7 +200,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     /// <returns>A parsed Zip Archive including entries to read from.</returns>
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="IndexOutOfRangeException"/>
-    public static async Task<ZipArchiveReader> CreateFromStreamFactoryAsync(
+    public static async Task<ZipArchiveReader> CreateFromAsync(
         StreamFactoryAsync streamFactory,
         CancellationToken  token = default)
     {
@@ -240,10 +241,10 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         }
 
         ZipArchiveReader reader =
-            await CreateFromCentralDirectoryStreamAsync(streamFactory,
-                                                        sizeOfCD,
-                                                        offsetOfCD,
-                                                        token);
+            await CreateFromCentralDirectoryStreamFactoryAsync(streamFactory,
+                                                               sizeOfCD,
+                                                               offsetOfCD,
+                                                               token);
 
         reader.ArchiveComment = archiveComment;
         return reader;
@@ -256,7 +257,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     /// <returns>A parsed Zip Archive including entries to read from.</returns>
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="IndexOutOfRangeException"/>
-    public static ZipArchiveReader CreateFromStreamFactory(StreamFactory streamFactory)
+    public static ZipArchiveReader CreateFrom(StreamFactory streamFactory)
     {
         long streamLength = GetLengthFromStreamFactory(streamFactory);
         if (streamLength <= 0)
@@ -299,29 +300,153 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         }
 
         ZipArchiveReader reader =
-            CreateFromCentralDirectoryStream(streamFactory,
-                                             sizeOfCD,
-                                             offsetOfCD);
+            CreateFromCentralDirectoryStreamFactory(streamFactory,
+                                                    sizeOfCD,
+                                                    offsetOfCD);
 
+        reader.ArchiveComment = archiveComment;
+        return reader;
+    }
+
+    /// <summary>
+    /// Creates a <see cref="ZipArchiveReader"/> from a <see cref="Stream"/> asynchronously.
+    /// </summary>
+    /// <param name="sourceStream">The source <see cref="Stream"/> for the reader to read from.</param>
+    /// <param name="token">Cancellation token for asynchronous operations.</param>
+    /// <returns>A parsed Zip Archive including entries to read from.</returns>
+    /// <exception cref="InvalidOperationException"/>
+    /// <exception cref="IndexOutOfRangeException"/>
+    public static async Task<ZipArchiveReader> CreateFromAsync(
+        Stream            sourceStream,
+        CancellationToken token = default)
+    {
+        long streamLength = sourceStream.Length;
+        if (streamLength <= 0)
+        {
+            throw new InvalidOperationException("Stream has 0 bytes in size!");
+        }
+
+        if (!sourceStream.CanSeek)
+        {
+            throw new InvalidOperationException("Stream must be seekable!");
+        }
+
+        string? archiveComment;
+        long offsetOfCD;
+        long sizeOfCD;
+
+        long offsetOfEOCD = Math.Clamp(streamLength - Constants.EOCDBufferLength,
+                                       0,
+                                       streamLength);
+
+        sourceStream.Position = offsetOfEOCD;
+
+        (offsetOfCD, sizeOfCD, archiveComment) =
+            await FindCentralDirectoryOffsetAndSizeAsync(sourceStream,
+                                                         Constants.EOCDBufferLength,
+                                                         token);
+
+        if (offsetOfCD <= 0)
+        {
+            throw new InvalidOperationException("Cannot find Central Directory Record offset");
+        }
+
+        if (sizeOfCD == 0)
+        {
+            return new ZipArchiveReader
+            {
+                ArchiveComment = archiveComment
+            };
+        }
+
+        sourceStream.Position = offsetOfCD;
+
+        ZipArchiveReader reader =
+            await CreateFromCentralDirectoryStreamAsync(sourceStream,
+                                                        sizeOfCD,
+                                                        token);
+
+        reader.ArchiveComment = archiveComment;
+        return reader;
+    }
+
+    /// <summary>
+    /// Creates a <see cref="ZipArchiveReader"/> from a <see cref="Stream"/>.
+    /// </summary>
+    /// <param name="sourceStream">The source <see cref="Stream"/> for the reader to read from.</param>
+    /// <returns>A parsed Zip Archive including entries to read from.</returns>
+    /// <exception cref="InvalidOperationException"/>
+    /// <exception cref="IndexOutOfRangeException"/>
+    public static ZipArchiveReader CreateFrom(Stream sourceStream)
+    {
+        long streamLength = sourceStream.Length;
+        if (streamLength <= 0)
+        {
+            throw new InvalidOperationException("Stream has 0 bytes in size!");
+        }
+
+        string? archiveComment;
+        long offsetOfCD;
+        long sizeOfCD;
+
+        long offsetOfEOCD = Math.Clamp(streamLength - Constants.EOCDBufferLength,
+                                       0,
+                                       streamLength);
+
+        sourceStream.Position = offsetOfEOCD;
+
+        scoped Span<byte> stackBuffer = stackalloc byte[Constants.EOCDBufferLength];
+
+        int read;
+        int offset = 0;
+        while ((read = sourceStream.Read(stackBuffer[offset..])) > 0)
+        {
+            offset += read;
+        }
+        (offsetOfCD, sizeOfCD, archiveComment) = FindCentralDirectoryOffsetAndSize(stackBuffer[..offset]);
+
+        if (offsetOfCD <= 0)
+        {
+            throw new InvalidOperationException("Cannot find Central Directory Record offset");
+        }
+
+        if (sizeOfCD == 0)
+        {
+            return new ZipArchiveReader
+            {
+                ArchiveComment = archiveComment
+            };
+        }
+
+        sourceStream.Position = offsetOfCD;
+
+        ZipArchiveReader reader = CreateFromCentralDirectoryStream(sourceStream, sizeOfCD);
         reader.ArchiveComment = archiveComment;
         return reader;
     }
     #endregion
 
     #region Utilities
-    private static ZipArchiveReader
-        CreateFromCentralDirectoryStream(
-            StreamFactory streamFactory,
-            long          size,
-            long          offset)
+    private static ZipArchiveReader CreateFromCentralDirectoryStreamFactory(
+        StreamFactory streamFactory,
+        long          size,
+        long          offset)
     {
         if (size == 0)
         {
             return new ZipArchiveReader();
         }
 
-        bool    isUseStackalloc        = size <= 64 << 10;
-        bool    isUseRentBuffer        = !isUseStackalloc && size <= 4 << 20;
+        using Stream centralDirectoryStream = streamFactory(offset, null);
+        return CreateFromCentralDirectoryStream(centralDirectoryStream, size);
+    }
+
+    private static ZipArchiveReader CreateFromCentralDirectoryStream(
+        Stream sourceStream,
+        long   size)
+    {
+        bool isUseStackalloc = size <= 64 << 10;
+        bool isUseRentBuffer = !isUseStackalloc && size <= 4 << 20;
         byte[]? centralDirectoryBuffer = null;
 
         if (!isUseStackalloc && isUseRentBuffer)
@@ -338,19 +463,17 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
 
         try
         {
-            using Stream centralDirectoryStream = streamFactory(offset, null);
-
             int bufferOffset = 0;
             while (size > 0)
             {
-                int read = centralDirectoryStream.Read(centralDirectorySpan.Slice(bufferOffset, (int)size));
+                int read = sourceStream.Read(centralDirectorySpan.Slice(bufferOffset, (int)size));
                 if (read == 0)
                 {
                     throw new IndexOutOfRangeException("Stream has prematurely reached End of Stream while more bytes need to be read");
                 }
 
                 bufferOffset += read;
-                size         -= (uint)read;
+                size -= (uint)read;
             }
 
             return CreateFromCentralDirectoryBuffer(centralDirectoryBuffer.AsSpan(0, bufferOffset));
@@ -365,7 +488,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     }
 
     private static async Task<ZipArchiveReader>
-        CreateFromCentralDirectoryStreamAsync(
+        CreateFromCentralDirectoryStreamFactoryAsync(
         StreamFactoryAsync streamFactory,
         long               size,
         long               offset,
@@ -376,6 +499,18 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             return new ZipArchiveReader();
         }
 
+        await using Stream centralDirectoryStream = await streamFactory(offset, null, token);
+        return await CreateFromCentralDirectoryStreamAsync(centralDirectoryStream,
+                                                           size,
+                                                           token);
+    }
+
+    private static async Task<ZipArchiveReader>
+        CreateFromCentralDirectoryStreamAsync(
+        Stream            sourceStream,
+        long              size,
+        CancellationToken token = default)
+    {
         bool isUseRentBuffer = size <= 4 << 20;
         byte[] centralDirectoryBuffer = isUseRentBuffer
             ? ArrayPool<byte>.Shared.Rent((int)size)
@@ -383,13 +518,10 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
 
         try
         {
-            await using Stream centralDirectoryStream =
-                await streamFactory(offset, null, token);
-
             int bufferOffset = 0;
             while (size > 0)
             {
-                int read = await centralDirectoryStream
+                int read = await sourceStream
                                 .ReadAsync(centralDirectoryBuffer.AsMemory(bufferOffset, (int)size),
                                            token)
                                 .ConfigureAwait(false);
@@ -399,7 +531,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
                 }
 
                 bufferOffset += read;
-                size         -= (uint)read;
+                size -= (uint)read;
             }
 
             return CreateFromCentralDirectoryBuffer(centralDirectoryBuffer.AsSpan(0, bufferOffset));
@@ -433,8 +565,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         return stream.Length;
     }
 
-    private static long GetLengthFromStreamFactory(
-        StreamFactory streamFactory)
+    private static long GetLengthFromStreamFactory(StreamFactory streamFactory)
     {
         using Stream stream = streamFactory(0, null);
         return stream.Length;

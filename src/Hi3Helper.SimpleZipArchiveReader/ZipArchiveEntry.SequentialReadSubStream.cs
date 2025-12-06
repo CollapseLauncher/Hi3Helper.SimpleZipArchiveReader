@@ -7,7 +7,7 @@ namespace Hi3Helper.SimpleZipArchiveReader;
 
 public sealed partial class ZipArchiveEntry
 {
-    private sealed class SequentialReadSubStream(Stream stream, long size) : Stream
+    private sealed class SequentialReadSubStream(Stream stream, long size, bool disposeStream) : Stream
     {
         private long _remainedToRead = size;
 
@@ -87,9 +87,22 @@ public sealed partial class ZipArchiveEntry
                 return;
             }
 
+            if (!disposeStream)
+            {
+                return;
+            }
+
             stream.Dispose();
         }
 
-        public override ValueTask DisposeAsync() => stream.DisposeAsync();
+        public override async ValueTask DisposeAsync()
+        {
+            if (!disposeStream)
+            {
+                return;
+            }
+
+            await stream.DisposeAsync();
+        }
     }
 }
