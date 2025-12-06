@@ -18,11 +18,10 @@ public sealed partial class ZipArchiveEntry
     public string?             Comment         { get; private init; }
     public long                Size            { get; private init; }
     public long                SizeCompressed  { get; private init; }
-    public DateTimeOffset      LastModified    { get; private set; }
-    public ZipCdrBitFlagValues Flags           { get; private set; }
-    public uint                Crc32           { get; private set; }
-    public bool                IsDeflate64     { get; private init; }
     public ZipCompressionTypes CompressionType { get; private init; }
+    public ZipCdrBitFlagValues Flags           { get; private init; }
+    public DateTimeOffset      LastModified    { get; private init; }
+    public uint                Crc32           { get; private init; }
 
     public bool IsDirectory
     {
@@ -44,7 +43,7 @@ public sealed partial class ZipArchiveEntry
     #endregion
 
     #region Isolated Properties
-    private long LocalBlockOffsetFromStream { get; set; }
+    private long LocalBlockOffsetFromStream { get; init; }
     #endregion
 
     /// <summary>
@@ -58,10 +57,6 @@ public sealed partial class ZipArchiveEntry
         StreamFactoryAsync streamFactory,
         CancellationToken  token = default)
     {
-        const int localHeaderLen      = 30;
-        const int filenameLenOffset   = 26;
-        const int extraFieldLenOffset = 28;
-
         if (IsDirectory)
         {
             throw new InvalidOperationException("Cannot open Stream for Directory-kind entry.");
@@ -69,17 +64,22 @@ public sealed partial class ZipArchiveEntry
 
         Stream stream = await streamFactory(LocalBlockOffsetFromStream, null, token);
 
-        byte[]  headerBuffer    = ArrayPool<byte>.Shared.Rent(localHeaderLen);
-        byte[]? extraDataBuffer = null;
+        byte[] headerBuffer = ArrayPool<byte>.Shared.Rent(Zip32LocalHeaderLength);
         try
         {
             // Try skip local header
-            int read = await stream.ReadAsync(headerBuffer.AsMemory(0, localHeaderLen), token);
+            int read = await stream.ReadAsync(headerBuffer.AsMemory(0, Zip32LocalHeaderLength), token);
+            if (read < Zip32LocalHeaderLength)
+            {
+                throw new InvalidOperationException("Local Zip Block header is invalid!");
+            }
 
-            int extraDataLen = GetExtraFieldsDataLength(read, localHeaderLen, headerBuffer, filenameLenOffset, extraFieldLenOffset);
+            Zip32LocalHeader header = MemoryMarshal.Read<Zip32LocalHeader>(headerBuffer);
+            header.EnsureHeaderIsValid();
 
-            extraDataBuffer = ArrayPool<byte>.Shared.Rent(extraDataLen);
-            _ = await stream.ReadAsync(extraDataBuffer.AsMemory(0, extraDataLen), token);
+            // Seek extra data
+            int extraDataLen = header.FilenameLength + header.ExtraFieldLength;
+            await stream.SeekStreamAdvancedToAsync(extraDataLen, token);
 
             // Once getting the data position, assign to SubStream.
             return new SequentialReadSubStream(stream, SizeCompressed);
@@ -92,10 +92,6 @@ public sealed partial class ZipArchiveEntry
         finally
         {
             ArrayPool<byte>.Shared.Return(headerBuffer);
-            if (extraDataBuffer != null)
-            {
-                ArrayPool<byte>.Shared.Return(extraDataBuffer);
-            }
         }
     }
 
@@ -112,7 +108,7 @@ public sealed partial class ZipArchiveEntry
         CancellationToken  token = default)
     {
         Stream subStream = await OpenRawSubStreamFromFactoryAsync(streamFactory, token);
-        return DetermineCreateStreamType(subStream, CompressionType, IsDeflate64, Size);
+        return DetermineCreateStreamType(subStream, CompressionType, Size);
     }
 
     /// <summary>
@@ -121,12 +117,8 @@ public sealed partial class ZipArchiveEntry
     /// <param name="streamFactory">The factory of the source <see cref="Stream"/> for the reader to read from.</param>
     /// <returns>A raw Sub-<see cref="Stream"/> of the current entry. If you need to create the decompression stream one, use <see cref="OpenStreamFromFactory"/> instead.</returns>
     /// <exception cref="InvalidOperationException"/>
-    public Stream OpenRawSubStreamFromFactory(StreamFactory streamFactory)
+    public unsafe Stream OpenRawSubStreamFromFactory(StreamFactory streamFactory)
     {
-        const int localHeaderLen      = 30;
-        const int filenameLenOffset   = 26;
-        const int extraFieldLenOffset = 28;
-
         if (IsDirectory)
         {
             throw new InvalidOperationException("Cannot open Stream for Directory-kind entry.");
@@ -137,13 +129,19 @@ public sealed partial class ZipArchiveEntry
         try
         {
             // Try skip local header
-            scoped Span<byte> headerBuffer = stackalloc byte[localHeaderLen];
+            scoped Span<byte> headerBuffer = stackalloc byte[Zip32LocalHeaderLength];
             int               read         = stream.Read(headerBuffer);
+            if (read < Zip32LocalHeaderLength)
+            {
+                throw new InvalidOperationException("Local Zip Block header is invalid!");
+            }
 
-            int extraDataLen = GetExtraFieldsDataLength(read, localHeaderLen, headerBuffer, filenameLenOffset, extraFieldLenOffset);
+            Zip32LocalHeader header = MemoryMarshal.Read<Zip32LocalHeader>(headerBuffer);
+            header.EnsureHeaderIsValid();
 
-            scoped Span<byte> extraDataBuffer = stackalloc byte[extraDataLen];
-            _ = stream.Read(extraDataBuffer);
+            // Seek extra data
+            int extraDataLen = header.FilenameLength + header.ExtraFieldLength;
+            stream.SeekStreamAdvancedTo(extraDataLen);
 
             // Once getting the data position, assign to SubStream.
             return new SequentialReadSubStream(stream, SizeCompressed);
@@ -163,47 +161,50 @@ public sealed partial class ZipArchiveEntry
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="NotSupportedException"/>
     public Stream OpenStreamFromFactory(StreamFactory streamFactory) =>
-        DetermineCreateStreamType(OpenRawSubStreamFromFactory(streamFactory), CompressionType, IsDeflate64, Size);
-
-    private static int GetExtraFieldsDataLength(
-        int        read,
-        int        localHeaderLen,
-        Span<byte> headerBuffer,
-        int        filenameLenOffset,
-        int        extraFieldLenOffset)
-    {
-        if (read < localHeaderLen)
-        {
-            throw new InvalidOperationException("Local Zip Block header is invalid!");
-        }
-
-        uint   signature     = MemoryMarshal.Read<uint>(headerBuffer);
-        ushort fileNameLen   = MemoryMarshal.Read<ushort>(headerBuffer[filenameLenOffset..]);
-        ushort extraFieldLen = MemoryMarshal.Read<ushort>(headerBuffer[extraFieldLenOffset..]);
-        int    extraDataLen  = fileNameLen + extraFieldLen;
-
-        if (Constants.Zip32LocalHeaderMagic != signature ||
-            fileNameLen > short.MaxValue ||
-            extraFieldLen > short.MaxValue)
-        {
-            throw new
-                InvalidOperationException("Local Zip Block header signature is invalid! Zip might be corrupted.");
-        }
-
-        return extraDataLen;
-    }
+        DetermineCreateStreamType(OpenRawSubStreamFromFactory(streamFactory), CompressionType, Size);
 
     private static Stream DetermineCreateStreamType(
         Stream              subStream,
         ZipCompressionTypes compType,
-        bool                isDeflate64,
         long                expectedUncompressedSize) =>
         compType switch
         {
             ZipCompressionTypes.Store => subStream,
-            ZipCompressionTypes.Deflate or ZipCompressionTypes.EnhancedDeflate => isDeflate64
-                ? new DeflateManagedStream(subStream, true, expectedUncompressedSize)
-                : new DeflateStream(subStream, CompressionMode.Decompress),
-            _ => throw new NotSupportedException($"Compression type: {compType} is not supported (Has Zip64 characteristics?: {isDeflate64}). It must be either Store (0), Deflate (8), EnhancedDeflate (9) or EnhancedDeflate64 (9 + Zip64 characteristics)")
+            ZipCompressionTypes.Deflate => new DeflateStream(subStream, CompressionMode.Decompress),
+            ZipCompressionTypes.Deflate64 => new DeflateManagedStream(subStream, true, expectedUncompressedSize),
+            _ => throw new NotSupportedException($"Compression type: {compType} is not supported. It must be either Store (0), Deflate (8) and Deflate64 (9)")
         };
+
+    #region Private classes and structs
+    private static readonly unsafe int Zip32LocalHeaderLength = sizeof(Zip32LocalHeader);
+
+    [StructLayout(LayoutKind.Sequential, Pack = 2)]
+    private struct Zip32LocalHeader
+    {
+        public uint                Signature;
+        public ushort              Version;
+        public ZipCdrBitFlagValues Flags;
+        public ZipCompressionTypes CompressionType;
+        public uint                DosLastModifiedDateTime;
+        public uint                Crc32;
+        public uint                CompressedSize;
+        public uint                Size;
+        public ushort              FilenameLength;
+        public ushort              ExtraFieldLength;
+
+        public void EnsureHeaderIsValid()
+        {
+            if (Signature != Constants.Zip32LocalHeaderMagic)
+            {
+                throw new InvalidOperationException("Invalid Local Header signature.");
+            }
+
+            if (FilenameLength > short.MaxValue ||
+                ExtraFieldLength > short.MaxValue)
+            {
+                throw new InvalidOperationException("Filename and ExtraField length is beyond signed Int16 Maximum value.");
+            }
+        }
+    }
+    #endregion
 }

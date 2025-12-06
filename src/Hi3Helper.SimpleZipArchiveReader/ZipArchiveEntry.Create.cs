@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 // ReSharper disable InconsistentNaming
 // ReSharper disable UnusedMember.Global
+#pragma warning disable CS0649 // Field is never assigned to, and will always have its default value
 
 namespace Hi3Helper.SimpleZipArchiveReader;
 
@@ -29,11 +30,10 @@ public sealed partial class ZipArchiveEntry
             return false;
         }
 
-        ushort             tag  = MemoryMarshal.Read<ushort>(dataTrailing);
-        ushort             size = MemoryMarshal.Read<ushort>(dataTrailing[sizeof(ushort)..]);
-        ReadOnlySpan<byte> data = dataTrailing.Slice(tagSizeFieldLen, size);
+        ZipExtraFieldHeader header = MemoryMarshal.Read<ZipExtraFieldHeader>(dataTrailing);
+        ReadOnlySpan<byte>  data   = dataTrailing.Slice(tagSizeFieldLen, header.Size);
 
-        if (tag != tagConstant)
+        if (header.Tag != tagConstant)
         {
             dataTrailing = dataTrailing[(data.Length + tagSizeFieldLen)..];
             goto TryReadAnother;
@@ -47,7 +47,7 @@ public sealed partial class ZipArchiveEntry
         // However, tools commonly write the fields anyway; the prevailing convention
         // is to respect the size, but only actually use the values if their 32 bit
         // values were all 0xFF.
-        if (data.Length < Zip32CDRFieldLengths.UncompressedSize)
+        if (data.Length < sizeof(uint))
         {
             return true;
         }
@@ -55,7 +55,7 @@ public sealed partial class ZipArchiveEntry
         // Advancing the stream (by reading from it) is possible only when:
         // 1. There is an explicit ask to do that (valid files, corresponding boolean flag(s) set to true).
         // 2. When the size indicates that all the information is available ("slightly invalid files").
-        bool readAllFields = size >= Zip64ExtraFieldLengths.MaximumExtraFieldLength;
+        bool readAllFields = header.Size >= Zip64ExtraFieldLengths.MaximumExtraFieldLength;
 
         if (uncompressedSize == Constants.Zip64Mask)
         {
@@ -99,35 +99,29 @@ public sealed partial class ZipArchiveEntry
         ReadOnlySpan<byte>  currentBlockSpan,
         out ZipArchiveEntry entry)
     {
-        uint signature = BinaryPrimitives.ReadUInt32LittleEndian(currentBlockSpan);
-
-        if (signature != Constants.Zip32CDRHeaderMagic)
-            throw new InvalidOperationException("Invalid Central Directory signature.");
-
-        ZipCdrBitFlagValues flags = MemoryMarshal.Read<ZipCdrBitFlagValues>(currentBlockSpan[Zip32CDRFieldLocations.GeneralPurposeBitFlags..]);
-        ZipCompressionTypes compressionType = MemoryMarshal.Read<ZipCompressionTypes>(currentBlockSpan[Zip32CDRFieldLocations.CompressionMethod..]);
-
-        uint   lastModified    = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.LastModified..]);
-        uint   crc32           = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.Crc32..]);
-        ushort fileNameLen     = MemoryMarshal.Read<ushort>(currentBlockSpan[Zip32CDRFieldLocations.FilenameLength..]);
-        ushort extraFieldLen   = MemoryMarshal.Read<ushort>(currentBlockSpan[Zip32CDRFieldLocations.ExtraFieldLength..]);
-        ushort fileCommentLen  = MemoryMarshal.Read<ushort>(currentBlockSpan[Zip32CDRFieldLocations.FileCommentLength..]);
-
-        if (flags.HasFlag(ZipCdrBitFlagValues.IsEncrypted))
+        if (currentBlockSpan.Length < Zip32CDRHeaderLength)
         {
-            throw new NotSupportedException("Encrypted archive is currently not supported.");
+            throw new IndexOutOfRangeException("Buffer is insufficient or the Zip Central Directory Record is malformed!");
         }
 
-        long compressedSize   = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.CompressedSize..]);
-        long uncompressedSize = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.UncompressedSize..]);
-        bool isDeflate64      = compressedSize == Constants.Zip64Mask || uncompressedSize == Constants.Zip64Mask;
+        Zip32CDRHeader header = MemoryMarshal.Read<Zip32CDRHeader>(currentBlockSpan);
+        header.EnsureHeaderIsValid();
 
-        long relativeOffsetOfLocalHeader = MemoryMarshal.Read<uint>(currentBlockSpan[Zip32CDRFieldLocations.RelativeOffsetOfLocalHeader..]);
-        ReadOnlySpan<byte> dynamicRecord = currentBlockSpan[Zip32CDRFieldLocations.DynamicData..];
+        long compressedSize              = header.CompressedSize;
+        long uncompressedSize            = header.Size;
+        long relativeOffsetOfLocalHeader = header.OffsetOfLocalHeader;
 
-        ReadOnlySpan<byte> fileNameSpan    = dynamicRecord[..fileNameLen];
-        ReadOnlySpan<byte> extraFieldSpan  = dynamicRecord.Slice(fileNameLen, extraFieldLen);
-        ReadOnlySpan<byte> fileCommentSpan = dynamicRecord.Slice(fileNameLen + extraFieldLen, fileCommentLen);
+        ReadOnlySpan<byte> dynamicRecord = currentBlockSpan[Zip32CDRHeaderLength..];
+
+        int extraFieldOffset = header.FilenameLength;
+        int extraFieldLen    = header.ExtraFieldLength;
+
+        int fileCommentOffset = extraFieldOffset + extraFieldLen;
+        int fileCommentLen    = header.CommentLength;
+
+        ReadOnlySpan<byte> fileNameSpan    = dynamicRecord[..header.FilenameLength];
+        ReadOnlySpan<byte> extraFieldSpan  = dynamicRecord.Slice(extraFieldOffset,  extraFieldLen);
+        ReadOnlySpan<byte> fileCommentSpan = dynamicRecord.Slice(fileCommentOffset, fileCommentLen);
 
         // Parse filename and comment
         string? fileComment = null;
@@ -144,19 +138,63 @@ public sealed partial class ZipArchiveEntry
         string fileName = Encoding.UTF8.GetString(fileNameSpan);
         entry = new ZipArchiveEntry
         {
+            Crc32           = header.Crc32,
+            Flags           = header.Flags,
+            CompressionType = header.CompressionType,
+            LastModified    = header.DosLastModifiedDateTime.DosTimeToDateTime(),
+
             Comment                    = fileComment,
             Filename                   = fileName,
-            Crc32                      = crc32,
-            Flags                      = flags,
-            IsDeflate64                = isDeflate64,
-            LastModified               = lastModified.DosTimeToDateTime(),
             LocalBlockOffsetFromStream = relativeOffsetOfLocalHeader,
             Size                       = uncompressedSize,
-            SizeCompressed             = compressedSize,
-            CompressionType            = compressionType
+            SizeCompressed             = compressedSize
         };
 
-        int endOfBlock = Zip32CDRFieldLocations.DynamicData + fileNameLen + extraFieldLen + fileCommentLen;
+        int endOfBlock = Zip32CDRHeaderLength + header.FilenameLength + extraFieldLen + fileCommentLen;
         return currentBlockSpan[endOfBlock..];
     }
+
+    #region Private classes and structs
+    private static readonly unsafe int Zip32CDRHeaderLength = sizeof(Zip32CDRHeader);
+
+    [StructLayout(LayoutKind.Sequential, Pack = 2)]
+    private readonly struct Zip32CDRHeader
+    {
+        public readonly uint                Signature;
+        public readonly ushort              Version;
+        public readonly ushort              VersionNeeded;
+        public readonly ZipCdrBitFlagValues Flags;
+        public readonly ZipCompressionTypes CompressionType;
+        public readonly uint                DosLastModifiedDateTime;
+        public readonly uint                Crc32;
+        public readonly uint                CompressedSize;
+        public readonly uint                Size;
+        public readonly ushort              FilenameLength;
+        public readonly ushort              ExtraFieldLength;
+        public readonly ushort              CommentLength;
+        public readonly ushort              DiskNumberStart;
+        public readonly ushort              InternalAttributes;
+        public readonly uint                ExternalAttributes;
+        public readonly uint                OffsetOfLocalHeader;
+
+        public void EnsureHeaderIsValid()
+        {
+            if (Signature != Constants.Zip32CDRHeaderMagic)
+            {
+                throw new InvalidOperationException("Invalid Central Directory signature.");
+            }
+
+            if (Flags.HasFlag(ZipCdrBitFlagValues.IsEncrypted))
+            {
+                throw new NotSupportedException("Encrypted archive is currently not supported.");
+            }
+        }
+    }
+
+    private readonly struct ZipExtraFieldHeader
+    {
+        public readonly ushort Tag;
+        public readonly ushort Size;
+    }
+    #endregion
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.IO;
 using System.Net.Http;
 using System.Threading;
@@ -24,6 +25,67 @@ internal static class Utilities
                                                        offset,
                                                        length,
                                                        token);
+    }
+
+    extension(Stream stream)
+    {
+        internal async ValueTask SeekStreamAdvancedToAsync(int               dataLength,
+                                                           CancellationToken token)
+        {
+            byte[]? buffer = dataLength > 4 << 20
+                ? null
+                : ArrayPool<byte>.Shared.Rent(dataLength);
+            Memory<byte> memory = (buffer ?? DelegateOverrides.GetHeapArray(dataLength))
+               .AsMemory(0, dataLength);
+
+            try
+            {
+                int offset = 0;
+                int read;
+                while ((read = await stream.ReadAsync(memory[offset..], token)
+                                           .ConfigureAwait(false)) > 0)
+                {
+                    offset += read;
+                }
+            }
+            finally
+            {
+                if (buffer != null)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
+            }
+        }
+
+        internal void SeekStreamAdvancedTo(int dataLength)
+        {
+            bool isUseStackalloc = dataLength <= 1 << 10;
+            byte[]? buffer = isUseStackalloc || dataLength > 4 << 20
+                ? null
+                : ArrayPool<byte>.Shared.Rent(dataLength);
+
+            scoped Span<byte> span = isUseStackalloc
+                ? stackalloc byte[dataLength]
+                : (buffer ?? DelegateOverrides.GetHeapArray(dataLength))
+               .AsSpan(0, dataLength);
+
+            try
+            {
+                int offset = 0;
+                int read;
+                while ((read = stream.Read(span[offset..])) > 0)
+                {
+                    offset += read;
+                }
+            }
+            finally
+            {
+                if (buffer != null)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
+            }
+        }
     }
 
     public static unsafe int LastIndexOfFromBittable<T>(this ReadOnlySpan<byte> span, T value)

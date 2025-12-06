@@ -12,7 +12,7 @@ public enum ZipCdrBitFlagValues : ushort
 
 public enum ZipCompressionTypes : ushort
 {
-    Store           = 0,
-    Deflate         = 8,
-    EnhancedDeflate = 9
+    Store     = 0,
+    Deflate   = 8,
+    Deflate64 = 9
 }
