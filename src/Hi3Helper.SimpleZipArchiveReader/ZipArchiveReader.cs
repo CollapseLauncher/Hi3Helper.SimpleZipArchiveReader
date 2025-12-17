@@ -2,7 +2,6 @@ using System;
 using System.Buffers;
 using System.Collections;
 using System.Collections.Generic;
-using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -377,7 +376,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     /// <returns>A parsed Zip Archive including entries to read from.</returns>
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="IndexOutOfRangeException"/>
-    public static ZipArchiveReader CreateFrom(Stream sourceStream)
+    public static unsafe ZipArchiveReader CreateFrom(Stream sourceStream)
     {
         long streamLength = sourceStream.Length;
         if (streamLength <= 0)
@@ -418,7 +417,19 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             };
         }
 
-        sourceStream.Position = offsetOfCD;
+        // Assume the offset is beyond the length due to invalid Zip, back-read from the offset position.
+        if (sourceStream.Length < offsetOfCD)
+        {
+            long wentBackward = sizeOfCD;
+            wentBackward += offsetOfCD > uint.MaxValue
+                ? sizeof(Zip64EOCDRHeader)
+                : sizeof(Zip32EOCDRHeader);
+            sourceStream.Position -= wentBackward;
+        }
+        else
+        {
+            sourceStream.Position = offsetOfCD;
+        }
 
         ZipArchiveReader reader = CreateFromCentralDirectoryStream(sourceStream, sizeOfCD);
         reader.ArchiveComment = archiveComment;
