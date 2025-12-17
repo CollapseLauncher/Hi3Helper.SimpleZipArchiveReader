@@ -487,7 +487,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
                 size -= (uint)read;
             }
 
-            return CreateFromCentralDirectoryBuffer(centralDirectoryBuffer.AsSpan(0, bufferOffset));
+            return CreateFromCentralDirectoryBuffer(centralDirectorySpan[..bufferOffset]);
         }
         finally
         {
