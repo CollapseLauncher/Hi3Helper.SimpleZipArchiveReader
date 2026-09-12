@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.IO;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 // ReSharper disable IdentifierTypo
@@ -88,14 +89,9 @@ internal static class Utilities
         }
     }
 
-    public static unsafe int LastIndexOfFromBittable<T>(this ReadOnlySpan<byte> span, T value)
+    public static int LastIndexOfFromBittable<T>(this ReadOnlySpan<byte> span, T value)
         where T : unmanaged
-    {
-        void*              valueP    = &value;
-        ReadOnlySpan<byte> valueSpan = new(valueP, sizeof(T));
-
-        return span.LastIndexOf(valueSpan);
-    }
+        => span.LastIndexOf(MemoryMarshal.AsBytes(new Span<T>(ref value)));
 
     public static DateTimeOffset DosTimeToDateTime(this uint dateTime)
     {
@@ -134,7 +130,7 @@ internal static class Utilities
         {
         }
 
-        ReturnInvalidDateIndicator:
+    ReturnInvalidDateIndicator:
         return new DateTime(1980, 1, 1, 0, 0, 0);
     }
 }

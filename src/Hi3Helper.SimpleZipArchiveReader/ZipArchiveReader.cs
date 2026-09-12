@@ -120,11 +120,8 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
                 throw new NotSupportedException($"The requested URL: {url} doesn't have Content-Length response header or the file content is empty!");
             }
 
-            string? archiveComment;
-            long    offsetOfCD;
-            long    sizeOfCD;
-
-            long offsetOfEOCD = zipRemoteUrlLength - Constants.EOCDBufferLength;
+            ZipCentralDirectoryInfo cdInfo;
+            long                    offsetOfEOCD = zipRemoteUrlLength - Constants.EOCDBufferLength;
             offsetOfEOCD = Math.Clamp(offsetOfEOCD, 0, zipRemoteUrlLength);
 
             await using (Stream bufferStreamOfEOCD =
@@ -133,32 +130,31 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
                                                                 null,
                                                                 token))
             {
-                (offsetOfCD, sizeOfCD, archiveComment) =
-                    await FindCentralDirectoryOffsetAndSizeAsync(bufferStreamOfEOCD,
-                                                                 Constants.EOCDBufferLength,
-                                                                 token);
+                cdInfo = await FindCentralDirectoryOffsetAndSizeAsync(bufferStreamOfEOCD,
+                                                                      Constants.EOCDBufferLength,
+                                                                      token);
             }
 
-            if (offsetOfCD == 0)
+            if (cdInfo.Offset == 0)
             {
                 throw new InvalidOperationException("Cannot find Central Directory Record offset");
             }
 
-            if (sizeOfCD == 0)
+            if (cdInfo.Size == 0)
             {
                 return new ZipArchiveReader
                 {
-                    ArchiveComment = archiveComment
+                    ArchiveComment = cdInfo.ArchiveComment
                 };
             }
 
             ZipArchiveReader reader =
                 await CreateFromCentralDirectoryStreamFactoryAsync(CreateStreamFromOffset,
-                                                                   sizeOfCD,
-                                                                   offsetOfCD,
+                                                                   cdInfo.Size,
+                                                                   cdInfo.Offset,
                                                                    token);
 
-            reader.ArchiveComment = archiveComment;
+            reader.ArchiveComment = cdInfo.ArchiveComment;
             return reader;
         }
         finally
@@ -209,10 +205,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             throw new InvalidOperationException("Stream has 0 bytes in size!");
         }
 
-        string? archiveComment;
-        long    offsetOfCD;
-        long    sizeOfCD;
-
+        ZipCentralDirectoryInfo cdInfo;
         long offsetOfEOCD = Math.Clamp(streamLength - Constants.EOCDBufferLength,
                                        0,
                                        streamLength);
@@ -220,32 +213,31 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         await using (Stream bufferStreamOfEOCD =
                      await streamFactory(offsetOfEOCD, Constants.EOCDBufferLength, token))
         {
-            (offsetOfCD, sizeOfCD, archiveComment) =
-                await FindCentralDirectoryOffsetAndSizeAsync(bufferStreamOfEOCD,
-                                                             Constants.EOCDBufferLength,
-                                                             token);
+            cdInfo = await FindCentralDirectoryOffsetAndSizeAsync(bufferStreamOfEOCD,
+                                                                  Constants.EOCDBufferLength,
+                                                                  token);
         }
 
-        if (offsetOfCD <= 0)
+        if (cdInfo.Offset <= 0)
         {
             throw new InvalidOperationException("Cannot find Central Directory Record offset");
         }
 
-        if (sizeOfCD == 0)
+        if (cdInfo.Size == 0)
         {
             return new ZipArchiveReader
             {
-                ArchiveComment = archiveComment
+                ArchiveComment = cdInfo.ArchiveComment
             };
         }
 
         ZipArchiveReader reader =
             await CreateFromCentralDirectoryStreamFactoryAsync(streamFactory,
-                                                               sizeOfCD,
-                                                               offsetOfCD,
+                                                               cdInfo.Size,
+                                                               cdInfo.Offset,
                                                                token);
 
-        reader.ArchiveComment = archiveComment;
+        reader.ArchiveComment = cdInfo.ArchiveComment;
         return reader;
     }
 
@@ -264,10 +256,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             throw new InvalidOperationException("Stream has 0 bytes in size!");
         }
 
-        string? archiveComment;
-        long offsetOfCD;
-        long sizeOfCD;
-
+        ZipCentralDirectoryInfo cdInfo;
         long offsetOfEOCD = Math.Clamp(streamLength - Constants.EOCDBufferLength,
                                        0,
                                        streamLength);
@@ -282,28 +271,28 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             {
                 offset += read;
             }
-            (offsetOfCD, sizeOfCD, archiveComment) = FindCentralDirectoryOffsetAndSize(stackBuffer[..offset]);
+            cdInfo = FindCentralDirectoryOffsetAndSize(stackBuffer[..offset]);
         }
 
-        if (offsetOfCD <= 0)
+        if (cdInfo.Offset <= 0)
         {
             throw new InvalidOperationException("Cannot find Central Directory Record offset");
         }
 
-        if (sizeOfCD == 0)
+        if (cdInfo.Size == 0)
         {
             return new ZipArchiveReader
             {
-                ArchiveComment = archiveComment
+                ArchiveComment = cdInfo.ArchiveComment
             };
         }
 
         ZipArchiveReader reader =
             CreateFromCentralDirectoryStreamFactory(streamFactory,
-                                                    sizeOfCD,
-                                                    offsetOfCD);
+                                                    cdInfo.Size,
+                                                    cdInfo.Offset);
 
-        reader.ArchiveComment = archiveComment;
+        reader.ArchiveComment = cdInfo.ArchiveComment;
         return reader;
     }
 
@@ -330,42 +319,38 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             throw new InvalidOperationException("Stream must be seekable!");
         }
 
-        string? archiveComment;
-        long offsetOfCD;
-        long sizeOfCD;
-
         long offsetOfEOCD = Math.Clamp(streamLength - Constants.EOCDBufferLength,
                                        0,
                                        streamLength);
 
         sourceStream.Position = offsetOfEOCD;
 
-        (offsetOfCD, sizeOfCD, archiveComment) =
+        ZipCentralDirectoryInfo cdInfo =
             await FindCentralDirectoryOffsetAndSizeAsync(sourceStream,
                                                          Constants.EOCDBufferLength,
                                                          token);
 
-        if (offsetOfCD <= 0)
+        if (cdInfo.Offset <= 0)
         {
             throw new InvalidOperationException("Cannot find Central Directory Record offset");
         }
 
-        if (sizeOfCD == 0)
+        if (cdInfo.Size == 0)
         {
             return new ZipArchiveReader
             {
-                ArchiveComment = archiveComment
+                ArchiveComment = cdInfo.ArchiveComment
             };
         }
 
-        sourceStream.Position = offsetOfCD;
+        sourceStream.Position = cdInfo.Offset;
 
         ZipArchiveReader reader =
             await CreateFromCentralDirectoryStreamAsync(sourceStream,
-                                                        sizeOfCD,
+                                                        cdInfo.Size,
                                                         token);
 
-        reader.ArchiveComment = archiveComment;
+        reader.ArchiveComment = cdInfo.ArchiveComment;
         return reader;
     }
 
@@ -373,10 +358,11 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
     /// Creates a <see cref="ZipArchiveReader"/> from a <see cref="Stream"/>.
     /// </summary>
     /// <param name="sourceStream">The source <see cref="Stream"/> for the reader to read from.</param>
+    /// <param name="cdBufferLength">The length of the Central-Directory buffer.</param>
     /// <returns>A parsed Zip Archive including entries to read from.</returns>
     /// <exception cref="InvalidOperationException"/>
     /// <exception cref="IndexOutOfRangeException"/>
-    public static unsafe ZipArchiveReader CreateFrom(Stream sourceStream)
+    public static unsafe ZipArchiveReader CreateFrom(Stream sourceStream, int cdBufferLength = Constants.EOCDBufferLength)
     {
         long streamLength = sourceStream.Length;
         if (streamLength <= 0)
@@ -384,60 +370,65 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             throw new InvalidOperationException("Stream has 0 bytes in size!");
         }
 
-        string? archiveComment;
-        long offsetOfCD;
-        long sizeOfCD;
-
-        long offsetOfEOCD = Math.Clamp(streamLength - Constants.EOCDBufferLength,
+        long offsetOfEOCD = Math.Clamp(streamLength - cdBufferLength,
                                        0,
                                        streamLength);
 
         sourceStream.Position = offsetOfEOCD;
+        byte[] eocdBuffer = ArrayPool<byte>.Shared.Rent(cdBufferLength);
 
-        scoped Span<byte> stackBuffer = stackalloc byte[Constants.EOCDBufferLength];
-
-        int read;
-        int offset = 0;
-        while ((read = sourceStream.Read(stackBuffer[offset..])) > 0)
+        try
         {
-            offset += read;
-        }
-        (offsetOfCD, sizeOfCD, archiveComment) = FindCentralDirectoryOffsetAndSize(stackBuffer[..offset]);
-
-        if (offsetOfCD <= 0)
-        {
-            throw new InvalidOperationException("Cannot find Central Directory Record offset");
-        }
-
-        if (sizeOfCD == 0)
-        {
-            return new ZipArchiveReader
+            int read;
+            int offset = 0;
+            while ((read = sourceStream.Read(eocdBuffer.AsSpan(offset))) > 0)
             {
-                ArchiveComment = archiveComment
-            };
-        }
+                offset += read;
+            }
 
-        // Assume the offset is beyond the length due to invalid Zip, back-read from the offset position.
-        if (sourceStream.Length < offsetOfCD)
-        {
-            long wentBackward = sizeOfCD;
-            wentBackward += offsetOfCD > uint.MaxValue
-                ? sizeof(Zip64EOCDRHeader)
-                : sizeof(Zip32EOCDRHeader);
-            sourceStream.Position -= wentBackward;
-        }
-        else
-        {
-            sourceStream.Position = offsetOfCD;
-        }
+            ZipCentralDirectoryInfo cdInfo =
+                FindCentralDirectoryOffsetAndSize(eocdBuffer.AsSpan(0, offset));
 
-        ZipArchiveReader reader = CreateFromCentralDirectoryStream(sourceStream, sizeOfCD);
-        reader.ArchiveComment = archiveComment;
-        return reader;
+            if (cdInfo.Offset <= 0)
+            {
+                throw new InvalidOperationException("Cannot find Central Directory Record offset");
+            }
+
+            if (cdInfo.Size == 0)
+            {
+                return new ZipArchiveReader
+                {
+                    ArchiveComment = cdInfo.ArchiveComment
+                };
+            }
+
+            // Assume the offset is beyond the length due to invalid Zip, back-read from the offset position.
+            if (sourceStream.Length < cdInfo.Offset)
+            {
+                long wentBackward = cdInfo.Size;
+                wentBackward += cdInfo.Offset > uint.MaxValue
+                    ? sizeof(Zip64EOCDRHeader)
+                    : sizeof(Zip32EOCDRHeader);
+                sourceStream.Position -= wentBackward;
+            }
+            else
+            {
+                sourceStream.Position = cdInfo.Offset;
+            }
+
+            ZipArchiveReader reader = CreateFromCentralDirectoryStream(sourceStream, cdInfo.Size);
+            reader.ArchiveComment = cdInfo.ArchiveComment;
+            return reader;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(eocdBuffer);
+        }
     }
     #endregion
 
     #region Utilities
+
     private static ZipArchiveReader CreateFromCentralDirectoryStreamFactory(
         StreamFactory streamFactory,
         long          size,
@@ -582,7 +573,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         return stream.Length;
     }
 
-    private static async ValueTask<(long Offset, long Size, string? ArchiveComment)>
+    private static async ValueTask<ZipCentralDirectoryInfo>
         FindCentralDirectoryOffsetAndSizeAsync(
             Stream            stream,
             int               bufferSize,
@@ -605,14 +596,14 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         }
     }
 
-    private static (long Offset, long Size, string? ArchiveComment)
+    private static ZipCentralDirectoryInfo
         FindCentralDirectoryOffsetAndSize(ReadOnlySpan<byte> bufferSpan)
     {
         int lastIndexOfMagic32 = bufferSpan.LastIndexOfFromBittable(Constants.Zip32EOCDRHeaderMagic);
         int lastIndexOfMagic64 = bufferSpan.LastIndexOfFromBittable(Constants.Zip64EOCDRHeaderMagic);
         if (lastIndexOfMagic32 < 0 && lastIndexOfMagic64 < 0)
         {
-            throw new IndexOutOfRangeException("Cannot find an offset of the Central Directory");
+            return new ZipCentralDirectoryInfo(lastIndexOfMagic32, 0, null);
         }
 
         // First, check if the archive uses Zip64 record for End of Central Directory Record.
@@ -622,7 +613,7 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             : FindCentralDirectoryOffsetAndSize32(bufferSpan, lastIndexOfMagic32);
     }
 
-    private static (uint Offset, uint Size, string? ArchiveComment)
+    private static ZipCentralDirectoryInfo
         FindCentralDirectoryOffsetAndSize32(ReadOnlySpan<byte> buffer, int offset)
     {
         buffer = buffer[offset..];
@@ -645,25 +636,25 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
             ? Encoding.Default.GetString(commentSpan)
             : null;
 
-        return (offsetCDOnStream, sizeCDOnStream, archiveComment);
+        return new ZipCentralDirectoryInfo(offsetCDOnStream, sizeCDOnStream, archiveComment);
     }
 
-    private static (long Offset, long Size, string? ArchiveComment)
+    private static ZipCentralDirectoryInfo
         FindCentralDirectoryOffsetAndSize64(ReadOnlySpan<byte> buffer, int offset32, int offset64)
     {
         // Try to get the offset from Zip32 record first. Since the size can be dynamic
         // and not always be defined in Zip64 record.
-        (uint offsetCDR32, uint sizeCDR32, string? archiveComment) = FindCentralDirectoryOffsetAndSize32(buffer, offset32);
+        ZipCentralDirectoryInfo cd32Info = FindCentralDirectoryOffsetAndSize32(buffer, offset32);
 
         // Skip if both offset and size aren't exceeding uint.MaxValue, even though Zip64 End of Central Directory Record exist.
-        if (offsetCDR32 != Constants.Zip64Mask &&
-            sizeCDR32 != Constants.Zip64Mask)
+        if (cd32Info.Offset != Constants.Zip64Mask &&
+            cd32Info.Size != Constants.Zip64Mask)
         {
-            return (offsetCDR32, sizeCDR32, archiveComment);
+            return cd32Info;
         }
 
-        long offsetCDR64 = offsetCDR32;
-        long sizeCDR64   = sizeCDR32;
+        long offsetCDR64 = cd32Info.Offset;
+        long sizeCDR64   = cd32Info.Size;
 
         // Then, we try to capture the offset and size from Zip64 End of Central Directory Record.
         ReadOnlySpan<byte> buffer64 = buffer[offset64..];
@@ -675,17 +666,17 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         Zip64EOCDRHeader header = MemoryMarshal.Read<Zip64EOCDRHeader>(buffer64);
         header.EnsureHeaderIsValid();
 
-        if (sizeCDR32 == Constants.Zip64Mask)
+        if (cd32Info.Size == Constants.Zip64Mask)
         {
             sizeCDR64 = header.CentralDirectorySize;
         }
 
-        if (offsetCDR32 == Constants.Zip64Mask)
+        if (cd32Info.Offset == Constants.Zip64Mask)
         {
             offsetCDR64 = header.CentralDirectoryOffset;
         }
 
-        return (offsetCDR64, sizeCDR64, archiveComment);
+        return new ZipCentralDirectoryInfo(offsetCDR64, sizeCDR64, cd32Info.ArchiveComment);
     }
 
     #endregion
@@ -762,5 +753,21 @@ public class ZipArchiveReader : IReadOnlyCollection<ZipArchiveEntry>
         }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly struct ZipCentralDirectoryInfo
+    {
+        internal ZipCentralDirectoryInfo(long    offset,
+                                         long    size,
+                                         string? archiveComment)
+        {
+            Offset         = offset;
+            Size           = size;
+            ArchiveComment = archiveComment;
+        }
+
+        public readonly long    Offset;
+        public readonly long    Size;
+        public readonly string? ArchiveComment;
+    }
     #endregion
 }
